@@ -77,6 +77,23 @@ def local_date_from_timestamp(value: Any) -> str:
         return date_string(dt.datetime.now().date())
 
 
+def parse_utc_timestamp(value: Any) -> dt.datetime | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = dt.datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+    except Exception:
+        return None
+
+
 def collect(base_dir: Path) -> dict[str, Any]:
     today_date = dt.datetime.now().date()
     today_str = date_string(today_date)
@@ -143,6 +160,7 @@ def collect(base_dir: Path) -> dict[str, Any]:
     # Transcripts for models
     models_stats: dict[str, dict[str, Any]] = {}
     latest_model = "Gemini 3.7 Flash"
+    prompt_events: list[dict[str, Any]] = []
     if brain_dir.exists():
         try:
             transcript_files = list(brain_dir.glob("*/.system_generated/logs/transcript.jsonl"))
@@ -173,6 +191,9 @@ def collect(base_dir: Path) -> dict[str, Any]:
                             models_stats[clean_model_key]["steps"] += 1
                             if step.get("type") == "USER_INPUT":
                                 models_stats[clean_model_key]["prompts"] += 1
+                                step_dt = parse_utc_timestamp(step.get("created_at"))
+                                if step_dt:
+                                    prompt_events.append({"model": current_model, "time": step_dt})
                 except Exception:
                     continue
         except Exception:
@@ -217,21 +238,29 @@ def collect(base_dir: Path) -> dict[str, Any]:
     # Limits calculation by model group
     now_utc = dt.datetime.now(dt.timezone.utc)
     next_midnight_utc = (now_utc + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    session_reset_utc = now_utc + dt.timedelta(hours=5)
+    current_midnight_utc = next_midnight_utc - dt.timedelta(days=1)
+    claude_window_start = now_utc - dt.timedelta(hours=5)
 
     flash_count = 0
     thinking_count = 0
     claude_count = 0
+    claude_prompt_times = []
 
-    for m_name, m_data in models_stats.items():
-        m_lower = m_name.lower()
-        p_cnt = int(m_data.get("prompts", 0))
+    for event in prompt_events:
+        m_lower = event["model"].lower()
+        t = event["time"]
         if "claude" in m_lower:
-            claude_count += p_cnt
+            if t >= claude_window_start:
+                claude_count += 1
+                claude_prompt_times.append(t)
         elif "high" in m_lower or "thinking" in m_lower or "pro" in m_lower:
-            thinking_count += p_cnt
+            if t >= current_midnight_utc:
+                thinking_count += 1
         else:
-            flash_count += p_cnt
+            if t >= current_midnight_utc:
+                flash_count += 1
+
+    claude_reset_utc = (min(claude_prompt_times) + dt.timedelta(hours=5)) if claude_prompt_times else (now_utc + dt.timedelta(hours=5))
 
     limits = [
         {
@@ -265,7 +294,7 @@ def collect(base_dir: Path) -> dict[str, Any]:
             "used": claude_count,
             "allowance": 50,
             "percent": min(1.0, round(claude_count / 50.0, 3)),
-            "resetsAt": session_reset_utc.isoformat()
+            "resetsAt": claude_reset_utc.isoformat()
         }
     ]
 

@@ -73,6 +73,23 @@ def local_date_from_timestamp(value: Any) -> str:
         return date_string(dt.datetime.now().date())
 
 
+def parse_utc_timestamp(value: Any) -> dt.datetime | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = dt.datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+    except Exception:
+        return None
+
+
 def empty_result() -> dict[str, Any]:
     recent_dates = recent_date_strings()
     return {
@@ -165,13 +182,14 @@ def parse_presence(presence_dir: Path) -> set[str]:
     return active_ids
 
 
-def parse_transcripts(brain_dir: Path) -> tuple[Counter, dict[str, dict[str, Any]], str]:
+def parse_transcripts(brain_dir: Path) -> tuple[Counter, dict[str, dict[str, Any]], str, list[dict[str, Any]]]:
     tool_counter: Counter = Counter()
     models_stats: dict[str, dict[str, Any]] = {}
     latest_model = "Gemini 3.7 Flash"
+    prompt_events: list[dict[str, Any]] = []
 
     if not brain_dir.exists():
-        return tool_counter, models_stats, latest_model
+        return tool_counter, models_stats, latest_model, prompt_events
 
     try:
         transcript_files = list(brain_dir.glob("*/.system_generated/logs/transcript.jsonl"))
@@ -214,6 +232,12 @@ def parse_transcripts(brain_dir: Path) -> tuple[Counter, dict[str, dict[str, Any
                         models_stats[current_model]["steps"] += 1
                         if step.get("type") == "USER_INPUT":
                             models_stats[current_model]["prompts"] += 1
+                            step_dt = parse_utc_timestamp(step.get("created_at"))
+                            if step_dt:
+                                prompt_events.append({
+                                    "model": current_model,
+                                    "time": step_dt
+                                })
                         models_stats[current_model]["sessions"].add(conv_id)
 
                         # Tool call detection
@@ -242,7 +266,7 @@ def parse_transcripts(brain_dir: Path) -> tuple[Counter, dict[str, dict[str, Any
             "outputTokens": 0
         }
 
-    return tool_counter, formatted_models, latest_model
+    return tool_counter, formatted_models, latest_model, prompt_events
 
 
 def scan(base_dir: Path) -> dict[str, Any]:
@@ -265,7 +289,7 @@ def scan(base_dir: Path) -> dict[str, Any]:
     daily_prompts, total_prompts_hist, recent_prompts, ws_counter = parse_history_file(history_path, recent_dates)
 
     # 3. Parse Transcripts for Tool Calls & Models
-    tool_counter, model_usage_dict, latest_model = parse_transcripts(brain_dir)
+    tool_counter, model_usage_dict, latest_model, prompt_events = parse_transcripts(brain_dir)
 
     # 4. Query SQLite DB for Sessions
     all_sessions: list[dict[str, Any]] = []
@@ -376,20 +400,33 @@ def scan(base_dir: Path) -> dict[str, Any]:
     
     # Reset timestamps
     next_midnight_utc = (now_utc + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    current_midnight_utc = next_midnight_utc - dt.timedelta(days=1)
     daily_reset_iso = next_midnight_utc.isoformat()
     session_5h_iso = (now_utc + dt.timedelta(hours=5)).isoformat()
+    claude_window_start = now_utc - dt.timedelta(hours=5)
 
-    # Aggregate prompts per model group
+    # Aggregate prompts per model group within active quota reset window
     group_prompts = {"flash": 0, "thinking": 0, "claude": 0}
-    for m_name, m_data in model_usage_dict.items():
-        m_lower = m_name.lower()
-        p_cnt = int(m_data.get("prompts", 0))
+    claude_prompt_times = []
+
+    for event in prompt_events:
+        m_lower = event["model"].lower()
+        t = event["time"]
         if "claude" in m_lower:
-            group_prompts["claude"] += p_cnt
+            if t >= claude_window_start:
+                group_prompts["claude"] += 1
+                claude_prompt_times.append(t)
         elif "high" in m_lower or "thinking" in m_lower or "pro" in m_lower:
-            group_prompts["thinking"] += p_cnt
+            if t >= current_midnight_utc:
+                group_prompts["thinking"] += 1
         else:
-            group_prompts["flash"] += p_cnt
+            if t >= current_midnight_utc:
+                group_prompts["flash"] += 1
+
+    if claude_prompt_times:
+        claude_reset_iso = (min(claude_prompt_times) + dt.timedelta(hours=5)).isoformat()
+    else:
+        claude_reset_iso = session_5h_iso
 
     flash_allowance = 200
     thinking_allowance = 100
@@ -427,7 +464,7 @@ def scan(base_dir: Path) -> dict[str, Any]:
             "used": group_prompts["claude"],
             "allowance": claude_allowance,
             "percent": min(1.0, round(group_prompts["claude"] / max(1, claude_allowance), 3)),
-            "resetsAt": session_5h_iso
+            "resetsAt": claude_reset_iso
         }
     ]
 
