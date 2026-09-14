@@ -9,9 +9,9 @@ Antigravity active session monitor, prompt metrics, tool telemetry, interactive 
 ### 1. Status Bar Icon & Live Badge
 - **Themed Vector Icon**: Clean 4-pointed sparkle icon dynamically colorized to match your active Omarchy theme foreground color via `MultiEffect`.
 - **State Pulse Indicator**: Color-coded pulse dot indicating real-time agent activity:
-  - 🟢 **Green (Pulsing)**: Agent is actively executing/thinking (`Working`).
-  - 🔵 **Blue**: Session is open but waiting for user input (`Waiting`).
-  - ⚪ **Transparent**: Idle (no active sessions).
+  - **Green (Pulsing)**: Agent is actively executing/thinking (`Working`).
+  - **Blue**: Session is open but waiting for user input (`Waiting`).
+  - **Transparent**: Idle (no active sessions).
 - **Configurable Bar Badge Mode**: Dynamic badge pill with configurable display modes:
   - `active` (Default): Number of concurrent background sessions currently running (auto-hides when idle for a clean bar).
   - `prompts`: Total prompts executed today (auto-hides when 0).
@@ -35,7 +35,7 @@ Antigravity active session monitor, prompt metrics, tool telemetry, interactive 
 
 ### 4. Quota Limits, Burn Rate & Desktop Alerts
 - **Real-Time Quota Buckets**: Live quota information fetched from `agy /usage` (Gemini Weekly & 5-Hour limits, Claude/GPT Weekly & 5-Hour limits).
-- **Burn Rate Velocity & Reset Forecasting**: Real-time hourly consumption tracking (`🔥 X%/h`) and intelligent reset pacing projections (`On pace · ~65% at reset` or early warnings `Depletes in ~2.0h before reset`).
+- **Burn Rate Velocity & Reset Forecasting**: Real-time hourly consumption tracking (`Burn: X%/h`) and intelligent reset pacing projections (`On pace · ~65% at reset` or early warnings `Depletes in ~2.0h before reset`).
 - **Dual Reset Time Display**: Shows both relative countdown timers (e.g. `2h 15m`) and exact local wall-clock times (e.g. `04:15 AM`).
 - **Configurable Low Quota Alerts**: Toggle desktop notifications on/off and configure custom remaining percentage thresholds (5% to 50%, default 15%) via `omarchy-notification-send` (with 2-hour per-bucket rate-limiting cooldown).
 

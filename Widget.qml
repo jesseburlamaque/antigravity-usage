@@ -1130,7 +1130,7 @@ BarWidget {
 
                 Text {
                   textFormat: Text.PlainText
-                  readonly property string burnStr: modelData.burnRateText ? ("🔥 " + modelData.burnRateText + " · ") : ""
+                  readonly property string burnStr: modelData.burnRateText ? ("Burn: " + modelData.burnRateText + " · ") : ""
                   text: burnStr + (modelData.forecastText || "")
                   color: {
                     if (modelData.forecastStatus === "critical") return bar ? bar.urgent : Color.urgent
