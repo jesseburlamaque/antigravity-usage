@@ -2,7 +2,11 @@
 
 Antigravity active session monitor, prompt metrics, tool telemetry, interactive session launcher, and 7-day usage stats in the Omarchy top bar.
 
-![preview](preview.png)
+<p align="center">
+  <img src="preview.png" width="32%" alt="Usage & Quota Limits" />
+  <img src="preview-2.png" width="32%" alt="Activity & Recent Sessions" />
+  <img src="preview-3.png" width="32%" alt="Settings & Badge Modes" />
+</p>
 
 ## Features
 
