@@ -9,9 +9,9 @@ Antigravity active session monitor, prompt metrics, tool telemetry, interactive 
 ### 1. Status Bar Icon & Live Badge
 - **Themed Vector Icon**: Clean 4-pointed sparkle icon dynamically colorized to match your active Omarchy theme foreground color via `MultiEffect`.
 - **State Pulse Indicator**: Color-coded pulse dot indicating real-time agent activity:
-  - **Green (Pulsing)**: Agent is actively executing/thinking (`Working`).
-  - **Blue**: Session is open but waiting for user input (`Waiting`).
-  - **Transparent**: Idle (no active sessions).
+  - 🟢 **Green (Pulsing)**: Agent is actively executing/thinking (`Working`).
+  - 🔵 **Blue**: Session is open but waiting for user input (`Waiting`).
+  - ⚪ **Transparent**: Idle (no active sessions).
 - **Configurable Bar Badge Mode**: Dynamic badge pill with configurable display modes:
   - `active` (Default): Number of concurrent background sessions currently running (auto-hides when idle for a clean bar).
   - `prompts`: Total prompts executed today (auto-hides when 0).
