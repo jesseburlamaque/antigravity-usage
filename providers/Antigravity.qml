@@ -17,8 +17,12 @@ Item {
     property bool hasActiveSession: false
     property string usageStatusText: ""
     property string authHelpText: ""
-    property string currentModel: "Gemini 3.7 Flash"
+    property string currentModel: ""
     property string tierLabel: "Google DeepMind"
+    property string updatedAt: ""
+    property double lastUpdatedMs: 0
+    property string quotaUpdatedAt: ""
+    property double lastFullRefreshMs: 0
 
     property int todayPrompts: 0
     property int todaySessions: 0
@@ -51,6 +55,15 @@ Item {
         return value
     }
 
+    property double refreshStartTime: 0
+
+    Timer {
+        id: minRefreshDurationTimer
+        interval: 800
+        repeat: false
+        onTriggered: root.refreshing = false
+    }
+
     Process {
         id: scanner
         running: false
@@ -69,8 +82,19 @@ Item {
             }
         }
 
-        onExited: {
-            root.refreshing = false
+        onExited: function(exitCode, exitStatus) {
+            var elapsed = Date.now() - root.refreshStartTime
+            if (elapsed < 800) {
+                minRefreshDurationTimer.interval = Math.max(50, 800 - elapsed)
+                minRefreshDurationTimer.restart()
+            } else {
+                root.refreshing = false
+            }
+
+            if (exitCode !== 0 && !root.ready) {
+                root.usageStatusText = "Scanner error (exit " + exitCode + ")"
+                root.authHelpText = "The usage scanner exited with an error. Check that python3 is installed."
+            }
         }
     }
 
@@ -86,7 +110,7 @@ Item {
             root.hasActiveSession = data.hasActiveSession === true
             root.hasLocalStats = data.hasLocalStats !== false
             root.tierLabel = data.tierLabel || "Google DeepMind"
-            root.currentModel = data.currentModel || "Gemini 3.7 Flash"
+            root.currentModel = data.currentModel || ""
 
             root.todayPrompts = Math.max(0, Number(data.todayPrompts || 0))
             root.todaySessions = Math.max(0, Number(data.todaySessions || 0))
@@ -110,8 +134,10 @@ Item {
 
             root.usageStatusText = data.usageStatusText || ""
             root.authHelpText = data.authHelpText || ""
-
-            root.checkLowQuotaAlerts(data.quotaGroups)
+            root.updatedAt = data.updatedAt || ""
+            root.lastUpdatedMs = Date.now()
+            root.quotaUpdatedAt = data.quotaUpdatedAt || ""
+            root.lastFullRefreshMs = Number(data.lastFullRefreshMs || data.quotaUpdatedMs || 0)
         } catch (e) {
             root.usageStatusText = "Scanner error"
             root.authHelpText = String(e)
@@ -119,51 +145,24 @@ Item {
         }
     }
 
-    property var notifiedLowQuotas: ({})
-
-    function checkLowQuotaAlerts(quotaGroups) {
-        if (!quotaGroups || !Array.isArray(quotaGroups)) return
-        var enableAlerts = (root.settings && root.settings.enableQuotaAlerts !== undefined) ? Boolean(root.settings.enableQuotaAlerts) : true
-        if (!enableAlerts) return
-
-        var thresholdPct = (root.settings && root.settings.quotaAlertThreshold !== undefined) ? Number(root.settings.quotaAlertThreshold) : 15
-        var thresholdFrac = Math.max(0.01, Math.min(1.0, (thresholdPct || 15) / 100.0))
-        var now = Date.now()
-
-        for (var i = 0; i < quotaGroups.length; i++) {
-            var g = quotaGroups[i]
-            var buckets = g.buckets || []
-            for (var j = 0; j < buckets.length; j++) {
-                var b = buckets[j]
-                var remFrac = Number(b.remainingFraction !== undefined ? b.remainingFraction : 1.0)
-                if (remFrac <= thresholdFrac) {
-                    var key = (g.name || "") + ":" + (b.name || "")
-                    var lastNotified = root.notifiedLowQuotas[key] || 0
-                    if (now - lastNotified > 7200000) {
-                        root.notifiedLowQuotas[key] = now
-                        var pct = Math.round(remFrac * 100)
-                        try {
-                            Quickshell.execDetached([
-                                "omarchy-notification-send",
-                                "Antigravity Quota Low (" + pct + "% remaining)",
-                                (g.name || "Model") + " " + (b.label || b.name || "") + " has " + pct + "% quota remaining."
-                            ])
-                        } catch (e) {}
-                    }
-                }
-            }
-        }
-    }
-
     function refresh(force) {
         if (scanner.running)
             return
 
+        minRefreshDurationTimer.stop()
+        root.refreshStartTime = Date.now()
         root.refreshing = true
         var cmd = ["python3", root.scannerScriptPath]
         if (force === true) {
             cmd.push("--force")
         }
+
+        var enableAlerts = (root.settings && root.settings.enableQuotaAlerts !== undefined) ? Boolean(root.settings.enableQuotaAlerts) : true
+        if (enableAlerts) {
+            var thresholdPct = (root.settings && root.settings.quotaAlertThreshold !== undefined) ? Number(root.settings.quotaAlertThreshold) : 15
+            cmd.push("--notify-low-quota", String(thresholdPct || 15))
+        }
+
         scanner.command = cmd
         scanner.running = true
     }

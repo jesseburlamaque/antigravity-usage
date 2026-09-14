@@ -47,7 +47,7 @@ BarWidget {
       return
     }
     if (button === Qt.MiddleButton) {
-      triggerRefresh()
+      triggerRefresh(true)
       return
     }
 
@@ -55,14 +55,14 @@ BarWidget {
       popupOpen = false
     } else {
       popupOpen = true
-      triggerRefresh()
+      triggerRefresh(false)
     }
   }
 
-  function triggerRefresh() {
+  function triggerRefresh(force) {
     refreshFlash = true
     refreshFlashTimer.restart()
-    usageMain.refreshAll(true)
+    usageMain.refreshAll(force === true)
   }
 
   function getTerminalArgs(cmdArgs, workspacePath) {
@@ -139,12 +139,8 @@ BarWidget {
     if (scannerPath) {
       try {
         Quickshell.execDetached(["python3", scannerPath, "--kill", conversationId])
-        root.triggerRefresh()
-        var t = Qt.createQmlObject('import QtQuick 2.15; Timer { interval: 350; repeat: false; running: true }', root)
-        t.triggered.connect(function() {
-          root.triggerRefresh()
-          t.destroy()
-        })
+        root.triggerRefresh(false)
+        killRefreshTimer.restart()
       } catch (e) {
         console.warn("antigravity-usage/kill", e)
       }
@@ -228,16 +224,43 @@ BarWidget {
     return !!(bar && bar.shell && typeof bar.shell.updateEntryInline === "function")
   }
 
-  function saveSettings() {
-    var next = normalizedSettings(draftSettings)
-    draftSettings = next
-    root.settings = next
+  function applySettings(next) {
+    var n = normalizedSettings(next)
+    root.settings = n
+    root.draftSettings = n
+  }
+
+  function broadcastSettings(next) {
+    var items = bar && typeof bar.moduleWidgets === "function"
+      ? bar.moduleWidgets(moduleName) : [root]
+    for (var i = 0; i < items.length; i++) {
+      if (items[i] && items[i] !== root && typeof items[i].applySettings === "function") {
+        items[i].applySettings(next)
+      }
+    }
+  }
+
+  function persistSettings(values) {
+    var current = normalizedSettings(root.settings)
+    var merged = cloneObject(current, {}) || {}
+    if (values) {
+      for (var k in values) {
+        merged[k] = values[k]
+      }
+    }
+    var next = normalizedSettings(merged)
+    applySettings(next)
+    broadcastSettings(next)
     if (canPersistSettings()) {
       bar.shell.updateEntryInline(root.moduleName, next)
       settingsStatusText = "Saved to shell.json"
     } else {
       settingsStatusText = "Saved for this session"
     }
+  }
+
+  function saveSettings() {
+    persistSettings(draftSettings)
     usageMain.refreshAll(true)
   }
 
@@ -246,10 +269,32 @@ BarWidget {
     return value === undefined || value === null ? fallback : value
   }
 
-  function setDraftValue(name, value) {
+  function setDraftOnly(name, value) {
     var next = normalizedSettings(draftSettings)
     next[name] = value
     draftSettings = next
+  }
+
+  function setDraftValue(name, value) {
+    updateSetting(name, value)
+  }
+
+  function updateSetting(name, value) {
+    var next = normalizedSettings(draftSettings)
+    next[name] = value
+    if (name === "badgeMode") {
+      var bm = String(value).toLowerCase().trim()
+      if (bm !== "active" && bm !== "prompts" && bm !== "off") bm = "active"
+      next.badgeMode = bm
+      next.showBadge = bm !== "off"
+    } else if (name === "showBadge") {
+      var sb = Boolean(value)
+      next.showBadge = sb
+      next.badgeMode = sb ? (next.badgeMode === "off" ? "active" : next.badgeMode) : "off"
+    }
+    next = normalizedSettings(next)
+    draftSettings = next
+    persistSettings(next)
   }
 
   readonly property bool isLightTheme: {
@@ -260,7 +305,7 @@ BarWidget {
     return bgLum > 0.5 || fgLum < 0.5
   }
 
-  readonly property url iconSource: Qt.resolvedUrl("assets/antigravity.svg")
+  readonly property url iconSource: Qt.resolvedUrl(isLightTheme ? "assets/antigravity-light.svg" : "assets/antigravity.svg")
 
   function getIconSource() {
     return root.iconSource
@@ -287,6 +332,8 @@ BarWidget {
     return "Antigravity" + status + "\n" + (provider.todayPrompts || 0) + " prompts today • " + (provider.currentModel || "Gemini")
   }
 
+  width: button.implicitWidth
+  height: button.implicitHeight
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -317,6 +364,13 @@ BarWidget {
     onTriggered: root.refreshFlash = false
   }
 
+  Timer {
+    id: killRefreshTimer
+    interval: 350
+    repeat: false
+    onTriggered: root.triggerRefresh(false)
+  }
+
   IpcHandler {
     target: "jesseburlamaque.antigravity-usage"
     function open(): string { root.showUsage(); root.popupOpen = true; return "ok" }
@@ -329,6 +383,7 @@ BarWidget {
     function refresh(): string { root.triggerRefresh(); return "ok" }
     function settings(): string { root.openSettings(); return "ok" }
     function openSettings(): string { root.openSettings(); return "ok" }
+    function setBadgeMode(mode: string): string { root.updateSetting("badgeMode", mode); return "ok" }
   }
 
   component UsageChip: Item {
@@ -350,7 +405,12 @@ BarWidget {
     }
     readonly property int promptCount: provider ? (provider.todayPrompts || 0) : 0
     readonly property int badgeCount: badgeMode === "prompts" ? promptCount : (badgeMode === "active" ? activeCount : 0)
-    readonly property bool hasBadge: badgeMode !== "off" && badgeCount > 0
+    readonly property bool hasBadge: {
+      if (badgeMode === "off") return false
+      if (badgeMode === "prompts") return true
+      if (badgeMode === "active") return activeCount > 0
+      return false
+    }
 
     width: hasBadge ? (13 + badgeText.implicitWidth + 10) : root.barSize
     height: root.barSize
@@ -484,7 +544,7 @@ BarWidget {
       }
       onCloseRequested: root.close()
       onTextKey: function(t) {
-        if (t === "r" || t === "R") root.triggerRefresh()
+        if (t === "r" || t === "R") root.triggerRefresh(true)
         else if (t === "s" || t === "S") root.settingsMode ? root.saveSettings() : root.openSettings()
         else if (t === "n" || t === "N") { if (!root.settingsMode) root.newSession() }
         else if (t === "q" || t === "Q") root.close()
@@ -518,6 +578,30 @@ BarWidget {
           id: panelSeparator
           Layout.fillWidth: true
           foreground: root.foreground
+
+          Item {
+            anchors.fill: parent
+            clip: true
+            visible: usageMain.refreshing
+
+            Rectangle {
+              id: loadingGlow
+              anchors.verticalCenter: parent.verticalCenter
+              height: 2
+              width: Math.max(60, panelSeparator.width * 0.35)
+              radius: 1
+              color: root.accent
+
+              NumberAnimation on x {
+                loops: Animation.Infinite
+                running: root.popupOpen && usageMain.refreshing
+                from: -loadingGlow.width
+                to: panelSeparator.width
+                duration: 800
+                easing.type: Easing.InOutQuad
+              }
+            }
+          }
         }
 
         Flickable {
@@ -538,9 +622,13 @@ BarWidget {
             width: flick.width
             spacing: 8
 
+            SkeletonContent {
+              visible: !root.settingsMode && usageMain.refreshing && (!root.provider || !root.provider.ready || !root.provider.hasLocalStats)
+            }
+
             Text {
               textFormat: Text.PlainText
-              visible: !root.settingsMode && (!root.provider || !root.provider.hasLocalStats)
+              visible: !root.settingsMode && (!root.provider || !root.provider.hasLocalStats) && !usageMain.refreshing
               Layout.fillWidth: true
               Layout.topMargin: 24
               text: "No Antigravity sessions found. Run `agy` to start."
@@ -558,7 +646,9 @@ BarWidget {
             ToolsCard { provider: root.settingsMode ? null : root.provider }
             RecentSessionsCard { provider: root.settingsMode ? null : root.provider }
 
-            UsageFooter { visible: !root.settingsMode }
+            UsageFooter {
+              visible: !root.settingsMode && (root.provider && root.provider.ready && root.provider.hasLocalStats)
+            }
             SettingsContent {
               id: settingsContent
               visible: root.settingsMode
@@ -639,14 +729,47 @@ BarWidget {
         }
       }
 
-      Text {
-        textFormat: Text.PlainText
-        text: provider ? (provider.currentModel || "Gemini 3.7 Flash") : ""
-        color: dim
-        font.family: fontFamily
-        font.pixelSize: 10
-        elide: Text.ElideRight
+      RowLayout {
         Layout.fillWidth: true
+        spacing: 6
+
+        Text {
+          textFormat: Text.PlainText
+          text: provider ? (provider.currentModel || "Antigravity") : ""
+          color: dim
+          font.family: fontFamily
+          font.pixelSize: 10
+          elide: Text.ElideRight
+          Layout.fillWidth: true
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          readonly property double refMs: (provider && provider.lastFullRefreshMs > 0) ? provider.lastFullRefreshMs : (provider ? provider.lastUpdatedMs : 0)
+          visible: !usageMain.refreshing && refMs > 0
+          readonly property int ageSec: refMs > 0 ? Math.floor((root.nowMs - refMs) / 1000) : -1
+          text: {
+            if (ageSec < 0) return ""
+            if (ageSec < 15) return "just now"
+            if (ageSec < 60) return ageSec + "s ago"
+            if (ageSec < 3600) return Math.floor(ageSec / 60) + "m ago"
+            return Math.floor(ageSec / 3600) + "h ago"
+          }
+          color: ageSec > 300 ? root.urgent : dim
+          font.family: fontFamily
+          font.pixelSize: 9
+          opacity: 0.7
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          visible: usageMain.refreshing
+          text: "Updating…"
+          color: root.accent
+          font.family: fontFamily
+          font.pixelSize: 9
+          opacity: 0.8
+        }
       }
     }
 
@@ -680,7 +803,7 @@ BarWidget {
         verticalPadding: 4
         active: root.refreshFlash || usageMain.refreshing
         onClicked: {
-          root.triggerRefresh()
+          root.triggerRefresh(true)
           keyCatcher.forceActiveFocus()
         }
       }
@@ -740,6 +863,118 @@ BarWidget {
       verticalPadding: 4
       active: true
       onClicked: root.saveSettings()
+    }
+  }
+
+  component SkeletonBlock: Rectangle {
+    id: skel
+    property real baseOpacity: 0.10
+    radius: 4
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, baseOpacity)
+
+    SequentialAnimation on opacity {
+      loops: Animation.Infinite
+      running: root.popupOpen
+      NumberAnimation { from: 0.4; to: 0.85; duration: 800; easing.type: Easing.InOutQuad }
+      NumberAnimation { from: 0.85; to: 0.4; duration: 800; easing.type: Easing.InOutQuad }
+    }
+  }
+
+  component SkeletonContent: ColumnLayout {
+    Layout.fillWidth: true
+    spacing: 8
+
+    // TodayCard Skeleton
+    SectionCard {
+      title: "Today & Totals"
+      RowLayout {
+        width: parent.width
+        spacing: Style.space(8)
+        Repeater {
+          model: 3
+          delegate: ColumnLayout {
+            Layout.fillWidth: true
+            Layout.preferredWidth: 1
+            spacing: 4
+            SkeletonBlock {
+              Layout.fillWidth: true
+              Layout.preferredHeight: 28
+              radius: 4
+            }
+            SkeletonBlock {
+              Layout.fillWidth: true
+              Layout.preferredHeight: 10
+              radius: 3
+            }
+          }
+        }
+      }
+    }
+
+    // QuotaLimitsCard Skeleton
+    SectionCard {
+      title: "Quota Limits"
+      ColumnLayout {
+        width: parent.width
+        spacing: 8
+        Repeater {
+          model: 2
+          delegate: ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 5
+            RowLayout {
+              Layout.fillWidth: true
+              SkeletonBlock {
+                Layout.preferredWidth: 90
+                Layout.preferredHeight: 11
+              }
+              Item { Layout.fillWidth: true }
+              SkeletonBlock {
+                Layout.preferredWidth: 45
+                Layout.preferredHeight: 11
+              }
+            }
+            SkeletonBlock {
+              Layout.fillWidth: true
+              Layout.preferredHeight: 6
+              radius: 3
+            }
+          }
+        }
+      }
+    }
+
+    // RecentSessionsCard Skeleton
+    SectionCard {
+      title: "Recent Sessions"
+      ColumnLayout {
+        width: parent.width
+        spacing: 8
+        Repeater {
+          model: 3
+          delegate: RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            SkeletonBlock {
+              Layout.preferredWidth: 14
+              Layout.preferredHeight: 14
+              radius: 7
+            }
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 4
+              SkeletonBlock {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 12
+              }
+              SkeletonBlock {
+                Layout.preferredWidth: 130
+                Layout.preferredHeight: 10
+              }
+            }
+          }
+        }
+      }
     }
   }
 
@@ -879,12 +1114,35 @@ BarWidget {
                   anchors.bottom: parent.bottom
                   width: parent.width * parent.frac
                   color: {
-                    if (parent.frac <= 0.15) return bar ? bar.urgent : Color.urgent
-                    if (parent.frac <= 0.30) return "#F59E0B"
+                    if (parent.frac <= 0.15 || modelData.forecastStatus === "critical") return bar ? bar.urgent : Color.urgent
+                    if (parent.frac <= 0.30 || modelData.forecastStatus === "warning") return "#F59E0B"
                     return modelData.color || ((modelData.name || "").indexOf("Claude") !== -1 ? "#D97757" : root.accent)
                   }
                   radius: 2
                   Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+                }
+              }
+
+              RowLayout {
+                visible: !!(modelData.forecastText && modelData.forecastText !== "")
+                Layout.fillWidth: true
+                spacing: 4
+
+                Text {
+                  textFormat: Text.PlainText
+                  readonly property string burnStr: modelData.burnRateText ? ("🔥 " + modelData.burnRateText + " · ") : ""
+                  text: burnStr + (modelData.forecastText || "")
+                  color: {
+                    if (modelData.forecastStatus === "critical") return bar ? bar.urgent : Color.urgent
+                    if (modelData.forecastStatus === "warning") return "#F59E0B"
+                    if (modelData.forecastStatus === "safe") return "#10B981"
+                    return root.dim
+                  }
+                  font.family: root.fontFamily
+                  font.pixelSize: 8
+                  font.bold: modelData.forecastStatus === "critical" || modelData.forecastStatus === "warning"
+                  elide: Text.ElideRight
+                  Layout.fillWidth: true
                 }
               }
             }
@@ -1454,7 +1712,7 @@ BarWidget {
 
     SectionCard {
       title: "Refresh Interval"
-      subtitle: "Telemetry and quota polling rate (scales to 3s when active)"
+      subtitle: "Telemetry and quota polling rate (scales to 10s when active)"
 
       ColumnLayout {
         width: parent.width
@@ -1478,26 +1736,34 @@ BarWidget {
 
     SectionCard {
       title: "Bar Badge Mode"
-      subtitle: "Choose what metric is displayed on the Omarchy bar badge"
+      subtitle: "Active Sessions: badge appears when active • Prompts: daily total • Off: icon only"
 
       ColumnLayout {
         width: parent.width
         spacing: 8
 
         ButtonGroup {
+          id: badgeModeButtonGroup
           foreground: root.foreground
           accent: root.accent
           fontFamily: root.fontFamily
           fontSize: 10
           options: [
-            { value: "active", label: "Active Sessions" },
-            { value: "prompts", label: "Today's Prompts" },
-            { value: "off", label: "Off" }
+            { value: "active", label: "Active Sessions", tooltip: "Show badge count when Antigravity sessions are active" },
+            { value: "prompts", label: "Today's Prompts", tooltip: "Show total prompt count for today" },
+            { value: "off", label: "Off", tooltip: "Hide badge entirely" }
           ]
           value: root.draftValue("badgeMode", root.draftValue("showBadge", true) === false ? "off" : "active")
           onChanged: function(v) {
-            root.setDraftValue("badgeMode", v)
-            root.setDraftValue("showBadge", v !== "off")
+            badgeModeButtonGroup.value = v
+            root.updateSetting("badgeMode", v)
+          }
+
+          Connections {
+            target: root
+            function onDraftSettingsChanged() {
+              badgeModeButtonGroup.value = String(root.draftValue("badgeMode", root.draftValue("showBadge", true) === false ? "off" : "active"))
+            }
           }
         }
       }
@@ -1566,7 +1832,9 @@ BarWidget {
           accent: root.accent
           font.family: root.fontFamily
           font.pixelSize: 11
-          onTextEdited: root.setDraftValue("terminalCommand", text)
+          onTextEdited: root.setDraftOnly("terminalCommand", text)
+          onEditingFinished: root.setDraftValue("terminalCommand", text)
+          onAccepted: root.setDraftValue("terminalCommand", text)
 
           Connections {
             target: root
