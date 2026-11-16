@@ -3,6 +3,7 @@
 
 import fcntl
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -314,6 +315,65 @@ class TestAntigravityScanner(unittest.TestCase):
 
                 # Exactly ONE notification must be sent across all concurrent threads
                 self.assertEqual(mock_run.call_count, 1)
+
+    def test_cache_permissions_under_umask_022(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir) / "antigravity-cli"
+            cache_dir = base_dir / "cache"
+            cache_dir.mkdir(parents=True)
+            os.chmod(cache_dir, 0o755)
+
+            quota_cache = cache_dir / "quota_usage_cache.json"
+            quota_cache.write_text(json.dumps({
+                "groups": [{
+                    "name": "Gemini Models",
+                    "buckets": [{
+                        "id": "gemini-weekly",
+                        "name": "Weekly Limit Remaining",
+                        "remaining_fraction": 0.85,
+                        "reset_time": "2026-09-11T02:24:22Z",
+                    }],
+                }]
+            }))
+            os.chmod(quota_cache, 0o644)
+
+            unrelated_file = cache_dir / "default_project_id.txt"
+            unrelated_file.write_text("proj-1")
+            os.chmod(unrelated_file, 0o644)
+
+            tpath = base_dir / "brain" / "conv-perm" / ".system_generated" / "logs" / "transcript.jsonl"
+            tpath.parent.mkdir(parents=True, exist_ok=True)
+            tpath.write_text(json.dumps({
+                "type": "USER_INPUT",
+                "created_at": "2026-09-08T01:00:00Z",
+                "tool_calls": [{"name": "run_command"}],
+            }) + "\n")
+
+            (base_dir / "history.jsonl").write_text(json.dumps({
+                "display": "private prompt text",
+                "timestamp": 1794812400000,
+                "project": "/home/test/repo",
+                "conversationId": "conv-perm",
+            }) + "\n")
+
+            old_umask = os.umask(0o022)
+            try:
+                scan(base_dir, force=True)
+                check_and_send_quota_notifications(base_dir, [], threshold_pct=15)
+            finally:
+                os.umask(old_umask)
+
+            self.assertEqual(stat.S_IMODE(cache_dir.stat().st_mode), 0o700)
+            for fname in (
+                "scanner_cache.json",
+                "transcript_stats_cache.json",
+                "quota_snapshots.json",
+                "quota_usage_cache.json",
+            ):
+                fpath = cache_dir / fname
+                self.assertTrue(fpath.exists(), f"Missing cache file {fname}")
+                self.assertEqual(stat.S_IMODE(fpath.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(unrelated_file.stat().st_mode), 0o644)
 
 
 if __name__ == "__main__":
