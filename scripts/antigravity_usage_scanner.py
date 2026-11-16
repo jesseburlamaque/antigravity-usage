@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from pathlib import Path
@@ -26,6 +27,75 @@ def default_base_dir() -> Path:
 
 def expand_path(value: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+
+
+_PLUGIN_CACHE_FILES = (
+    "scanner_cache.json",
+    "transcript_stats_cache.json",
+    "quota_snapshots.json",
+    "quota_usage_cache.json",
+    "quota_notification_state.json",
+    "quota_notification.lock",
+    "quota_refresh.flag",
+)
+
+
+def ensure_private_dir(path: Path) -> Path:
+    """Create directory if needed and enforce owner-only 0700 permissions on it."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def tighten_existing_cache_files(cache_dir: Path) -> None:
+    """Restrict permissions on plugin cache files previously created under looser umasks."""
+    for name in _PLUGIN_CACHE_FILES:
+        entry = cache_dir / name
+        try:
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            if entry.stat().st_mode & 0o077:
+                os.chmod(entry, 0o600)
+        except OSError:
+            pass
+
+
+def open_private_file(path: Path, flags: int, mode: int = 0o600):
+    """Open or create a file with restrictive 0600 permissions regardless of umask."""
+    ensure_private_dir(path.parent)
+    fd = os.open(str(path), flags, mode)
+    try:
+        os.fchmod(fd, mode)
+    except Exception:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, "w", encoding="utf-8")
+
+
+def write_private_json(path: Path, payload: Any, *, indent: int | None = None) -> None:
+    """Atomically write JSON into a 0700 directory with 0600 file permissions."""
+    ensure_private_dir(path.parent)
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp_f:
+            tmp_path = tmp_f.name
+            os.fchmod(tmp_f.fileno(), 0o600)
+            json.dump(payload, tmp_f, indent=indent)
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 def date_string(value: dt.date) -> str:
@@ -532,11 +602,7 @@ def parse_transcripts(
     # Save cache if updated
     if cache_dirty and cache_file:
         try:
-            cache_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp_c = cache_file.with_suffix(".tmp")
-            with open(tmp_c, "w", encoding="utf-8") as f:
-                json.dump(cache, f)
-            tmp_c.replace(cache_file)
+            write_private_json(cache_file, cache)
         except Exception:
             pass
 
@@ -652,7 +718,7 @@ def update_quota_snapshots(base_dir: Path, raw_groups: list[dict[str, Any]]) -> 
     """Record timestamped snapshot of quota fractions and calculate hourly burn rates per bucket."""
     now = time.time()
     snapshots_path = base_dir / "cache" / "quota_snapshots.json"
-    snapshots_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(snapshots_path.parent)
 
     current_snapshot = {}
     for g in raw_groups:
@@ -685,10 +751,7 @@ def update_quota_snapshots(base_dir: Path, raw_groups: list[dict[str, Any]]) -> 
 
     # Save snapshots (capped at 120 items)
     try:
-        tmp_snap = snapshots_path.with_suffix(".tmp")
-        with open(tmp_snap, "w", encoding="utf-8") as f:
-            json.dump(snapshots[-120:], f)
-        tmp_snap.replace(snapshots_path)
+        write_private_json(snapshots_path, snapshots[-120:])
     except Exception:
         pass
 
@@ -738,8 +801,8 @@ def trigger_bg_quota_refresh(base_dir: Path, agy_bin: str) -> None:
             pass
 
     try:
-        flag_file.parent.mkdir(parents=True, exist_ok=True)
-        flag_file.touch()
+        with open_private_file(flag_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC):
+            pass
         script_path = str(Path(__file__).resolve())
         subprocess.Popen(
             [sys.executable, script_path, "--refresh-quota-bg", str(base_dir)],
@@ -767,10 +830,7 @@ def bg_refresh_quota(base_dir: Path) -> None:
             payload = json.loads(res.stdout)
             cmd_data = payload.get("command", {}).get("data", {})
             if isinstance(cmd_data, dict) and "groups" in cmd_data and len(cmd_data["groups"]) > 0:
-                tmp_cache = cache_path.with_suffix(".tmp")
-                with open(tmp_cache, "w", encoding="utf-8") as f:
-                    json.dump(cmd_data, f)
-                tmp_cache.replace(cache_path)
+                write_private_json(cache_path, cmd_data)
                 update_quota_snapshots(base_dir, cmd_data.get("groups", []))
     except Exception:
         pass
@@ -784,7 +844,7 @@ def bg_refresh_quota(base_dir: Path) -> None:
 def fetch_agy_usage_quota(base_dir: Path, force: bool = False) -> dict[str, Any]:
     """Fetch real-time quota information via `agy -p /usage --output-format json` with caching."""
     cache_path = base_dir / "cache" / "quota_usage_cache.json"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(cache_path.parent)
     agy_bin = shutil.which("agy") or str(Path.home() / ".local/bin/agy")
 
     # 1. Read from cache if not forcing refresh
@@ -815,10 +875,7 @@ def fetch_agy_usage_quota(base_dir: Path, force: bool = False) -> dict[str, Any]
             cmd_data = payload.get("command", {}).get("data", {})
             if isinstance(cmd_data, dict) and "groups" in cmd_data and len(cmd_data["groups"]) > 0:
                 try:
-                    tmp_cache = cache_path.with_suffix(".tmp")
-                    with open(tmp_cache, "w", encoding="utf-8") as f:
-                        json.dump(cmd_data, f)
-                    tmp_cache.replace(cache_path)
+                    write_private_json(cache_path, cmd_data)
                 except Exception:
                     pass
                 return cmd_data
@@ -997,14 +1054,14 @@ def check_and_send_quota_notifications(
         return
 
     cache_dir = base_dir / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(cache_dir)
     lock_path = cache_dir / "quota_notification.lock"
     state_path = cache_dir / "quota_notification_state.json"
 
     # Non-blocking lock: if another monitor process is currently in this critical section, exit immediately
     lock_fd = None
     try:
-        lock_fd = open(lock_path, "w")
+        lock_fd = open_private_file(lock_path, os.O_WRONLY | os.O_CREAT)
         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (BlockingIOError, OSError):
         if lock_fd:
@@ -1101,10 +1158,7 @@ def check_and_send_quota_notifications(
 
         if modified:
             try:
-                tmp_state = state_path.with_suffix(".tmp")
-                with open(tmp_state, "w", encoding="utf-8") as f:
-                    json.dump(state_data, f, indent=2)
-                tmp_state.replace(state_path)
+                write_private_json(state_path, state_data, indent=2)
             except Exception:
                 pass
     finally:
@@ -1120,7 +1174,13 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
         return empty_result(base_dir)
 
     # Deduplicate concurrent scans across multi-monitor setups (TTL: 1.5s)
-    scan_cache_path = base_dir / "cache" / "scanner_cache.json"
+    cache_dir = base_dir / "cache"
+    try:
+        ensure_private_dir(cache_dir)
+        tighten_existing_cache_files(cache_dir)
+    except Exception:
+        pass
+    scan_cache_path = cache_dir / "scanner_cache.json"
     if not force and scan_cache_path.exists():
         try:
             mtime = scan_cache_path.stat().st_mtime
@@ -1450,11 +1510,7 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
 
     # Save to short-lived cache for concurrent monitor deduplication
     try:
-        scan_cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_cache = scan_cache_path.with_suffix(".tmp")
-        with open(tmp_cache, "w", encoding="utf-8") as f:
-            json.dump(result, f)
-        tmp_cache.replace(scan_cache_path)
+        write_private_json(scan_cache_path, result)
     except Exception:
         pass
 
